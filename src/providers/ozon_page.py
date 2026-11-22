@@ -155,7 +155,9 @@ def _response_skus(page: dict[str, Any]) -> set[str]:
             found.add(str(value))
     url = info.get("url")
     if isinstance(url, str):
-        sku = extract_sku(url)
+        # pageInfo.url у Ozon относительный: /product/slug-123/?__rr=1.
+        absolute = f"https://www.ozon.ru{url}" if url.startswith("/") else url
+        sku = extract_sku(absolute)
         if sku is not None:
             found.add(sku)
     for name, key in (("webGallery", "sku"), ("webStickyProducts", "sku")):
