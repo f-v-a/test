@@ -19,7 +19,8 @@ def main() -> None:
     url = sys.argv[1] if len(sys.argv) > 1 else "https://www.ozon.ru/"
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
-            headless=True, args=["--disable-blink-features=AutomationControlled"]
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-proxy-server"],
         )
         ctx = browser.new_context(
             locale="ru-RU",
@@ -36,6 +37,7 @@ def main() -> None:
         body = page.content()
         print("status:", resp.status if resp else None, "len:", len(body))
         print("geo-block:", "Выключите VPN" in body or "нет соединения" in body)
+        print("challenge:", "challenge" in body.lower() or "captcha" in body.lower())
         print("widgetStates:", "widgetStates" in body, "webPrice:", "webPrice" in body)
         print("title:", page.title()[:100])
         browser.close()
