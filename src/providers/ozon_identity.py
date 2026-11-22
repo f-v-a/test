@@ -23,7 +23,6 @@ Linux-браузерам Ozon показывает капчу чаще (набл
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,6 +31,7 @@ from typing import Any, Final, Protocol
 
 from src.providers.base import ProviderUnavailable
 from src.providers.ozon_antibot import AntibotKind, describe, detect_antibot
+from src.providers.ozon_browser import BrowserOptions, Fingerprint, open_context
 
 ORIGIN: Final = "https://www.ozon.ru"
 SEED_URL: Final = f"{ORIGIN}/api/composer-api.bx/_action/summaryV2"
@@ -39,9 +39,6 @@ PASS_COOKIE: Final = "abt_data"
 #: Без этой cookie 18+ товары отдают userAdultModal вместо карточки.
 ADULT_COOKIE: Final = ("adult_user_birthdate", "1990-01-01")
 DEFAULT_ACCEPT_LANGUAGE: Final = "ru-RU,ru;q=0.9"
-#: Ресурсы, которые challenge не нужны: экономим трафик и время загрузки.
-BLOCKED_RESOURCES: Final = frozenset({"image", "font", "media", "stylesheet"})
-_MAC_UA_PLATFORM: Final = "(Macintosh; Intel Mac OS X 10_15_7)"
 
 
 class IdentityUnavailable(ProviderUnavailable):
@@ -160,16 +157,16 @@ class BrowserMinter:
         proxy: str | None = None,
         mac_disguise: bool = True,
     ) -> None:
-        self._profile_dir = profile_dir
-        self._headless = headless
-        self._locale = locale
-        self._timezone = timezone
+        self._options = BrowserOptions(
+            profile_dir=profile_dir,
+            headless=headless,
+            locale=locale,
+            timezone=timezone,
+            proxy=proxy,
+            mac_disguise=mac_disguise,
+        )
         self._timeout = timeout
         self._poll = poll
-        self._proxy = proxy
-        self._mac_disguise = mac_disguise
-        self._brands: tuple[tuple[str, str], ...] = ()
-        self._user_agent = ""
 
     async def mint(self) -> OzonIdentity:
         try:
@@ -180,95 +177,14 @@ class BrowserMinter:
                 "затем patchright install chromium"
             ) from exc
 
-        self._profile_dir.mkdir(parents=True, exist_ok=True)
         async with async_playwright() as playwright:
-            context = await self._launch(playwright)
+            context, fingerprint = await open_context(playwright, self._options)
             try:
-                return await self._pass_seed(context)
+                return await self._pass_seed(context, fingerprint)
             finally:
                 await context.close()
 
-    async def _launch(self, playwright: Any) -> Any:
-        options: dict[str, Any] = {
-            "channel": "chromium",
-            "headless": self._headless,
-            "locale": self._locale,
-            "timezone_id": self._timezone,
-            "viewport": {"width": 1280, "height": 800},
-        }
-        if self._proxy:
-            options["proxy"] = {"server": self._proxy}
-        context = await playwright.chromium.launch_persistent_context(
-            str(self._profile_dir), **options
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
-        user_agent: str = await page.evaluate("navigator.userAgent")
-        if "HeadlessChrome" in user_agent:
-            # Headless-маркер в UA блокируется сайтами (shopper-mcp): перезапуск с правкой.
-            await context.close()
-            options["args"] = [f"--user-agent={user_agent.replace('HeadlessChrome', 'Chrome')}"]
-            context = await playwright.chromium.launch_persistent_context(
-                str(self._profile_dir), **options
-            )
-        await self._prepare(context)
-        return context
-
-    async def _prepare(self, context: Any) -> None:
-        page = context.pages[0] if context.pages else await context.new_page()
-        if self._mac_disguise:
-            await self._disguise_as_mac(context, page)
-
-        async def route_handler(route: Any) -> None:
-            if route.request.resource_type in BLOCKED_RESOURCES:
-                await route.abort()
-            else:
-                await route.continue_()
-
-        await context.route("**/*", route_handler)
-
-    async def _disguise_as_mac(self, context: Any, page: Any) -> None:
-        """UA/client-hints мака: Ozon чаще показывает капчу Linux-браузерам."""
-        # userAgentData доступен только на secure-странице, about:blank не подходит.
-        await page.goto("chrome://version")
-        raw_brands: Any = await page.evaluate("navigator.userAgentData.brands")
-        user_agent: str = await page.evaluate("navigator.userAgent")
-        await page.goto("about:blank")
-        brands = [
-            (str(item.get("brand", "")), str(item.get("version", "")))
-            for item in (raw_brands or [])
-            if isinstance(item, dict)
-        ]
-        mac_ua = re.sub(
-            r"\([^)]*\)",
-            _MAC_UA_PLATFORM,
-            user_agent.replace("HeadlessChrome", "Chrome"),
-            count=1,
-        )
-        metadata = [{"brand": brand, "version": version} for brand, version in brands]
-        session = await context.new_cdp_session(page)
-        await session.send(
-            "Emulation.setUserAgentOverride",
-            {
-                "userAgent": mac_ua,
-                "platform": "MacIntel",
-                "acceptLanguage": self._locale,
-                "userAgentMetadata": {
-                    "brands": metadata,
-                    "fullVersionList": metadata,
-                    "platform": "macOS",
-                    "platformVersion": "15.5.0",
-                    "architecture": "arm",
-                    "model": "",
-                    "mobile": False,
-                    "bitness": "64",
-                    "wow64": False,
-                },
-            },
-        )
-        self._brands = tuple(brands)
-        self._user_agent = mac_ua
-
-    async def _pass_seed(self, context: Any) -> OzonIdentity:
+    async def _pass_seed(self, context: Any, fingerprint: Fingerprint) -> OzonIdentity:
         page = context.pages[0] if context.pages else await context.new_page()
         deadline = time.monotonic() + self._timeout
         response = await page.goto(
@@ -291,9 +207,11 @@ class BrowserMinter:
             if kind is None and PASS_COOKIE in cookies and "<pre" in html.lower():
                 return OzonIdentity(
                     cookies=cookies,
-                    user_agent=self._user_agent or str(await page.evaluate("navigator.userAgent")),
-                    accept_language=self._locale,
-                    brands=self._brands,
+                    user_agent=fingerprint.user_agent,
+                    accept_language=self._options.locale,
+                    brands=fingerprint.brands,
+                    platform=fingerprint.platform,
+                    mobile=fingerprint.mobile,
                     minted_at=datetime.now(UTC),
                     source="browser",
                 )
