@@ -40,8 +40,13 @@ IN_PAGE_HEADERS: Final = {
     "x-o3-app-name": "dweb_client",
 }
 _FETCH_SCRIPT: Final = """
-async ({ url, headers }) => {
-    const response = await fetch(url, { method: 'GET', headers, credentials: 'include' });
+async ({ url, headers, timeoutMs }) => {
+    const response = await fetch(url, {
+        method: 'GET',
+        headers,
+        credentials: 'include',
+        signal: AbortSignal.timeout(timeoutMs),
+    });
     return { status: response.status, text: await response.text(), url: response.url };
 }
 """
@@ -174,7 +179,11 @@ class InPageTransport:
 
     async def get(self, url: str) -> TransportResponse:
         page = await self._get_page()
-        args = {"url": url, "headers": dict(IN_PAGE_HEADERS)}
+        args = {
+            "url": url,
+            "headers": dict(IN_PAGE_HEADERS),
+            "timeoutMs": max(1, round(self._timeout * 1000)),
+        }
         try:
             result = await page.evaluate(_FETCH_SCRIPT, args)
         except Exception as exc:
