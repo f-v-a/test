@@ -190,7 +190,19 @@ class BrowserMinter:
         response = await page.goto(
             SEED_URL, wait_until="domcontentloaded", timeout=self._timeout * 1000
         )
-        status = int(response.status) if response is not None else 0
+        # Статус ПОСЛЕДНЕГО навигационного ответа, а не только первого goto:
+        # антибот отвечает 403 и перезагружает страницу сам; после proof-of-work
+        # документ уже 200. Без этого успешный сид классифицировался бы как block.
+        status = {"code": int(response.status) if response is not None else 0}
+
+        def on_response(resp: Any) -> None:
+            try:
+                if resp.request.is_navigation_request() and resp.frame == page.main_frame:
+                    status["code"] = int(resp.status)
+            except Exception:
+                pass
+
+        page.on("response", on_response)
         last_kind: AntibotKind | None = None
         while time.monotonic() < deadline:
             cookies = {str(c["name"]): str(c["value"]) for c in await context.cookies()}
@@ -200,7 +212,7 @@ class BrowserMinter:
                 # Страница перезагружается после proof-of-work: контент недоступен.
                 await asyncio.sleep(self._poll)
                 continue
-            kind = detect_antibot(status, html)
+            kind = detect_antibot(status["code"], html)
             last_kind = kind or last_kind
             if kind in (AntibotKind.CAPTCHA, AntibotKind.BLOCK):
                 raise IdentityUnavailable(f"mint невозможен: {describe(kind)}")
