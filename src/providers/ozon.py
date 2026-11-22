@@ -22,6 +22,7 @@ _HOSTS = frozenset({"ozon.ru", "www.ozon.ru", "m.ozon.ru"})
 _PRODUCT_RE = re.compile(r"^/product/(?:[^/]*-)?(\d+)/?$")
 _LEGACY_RE = re.compile(r"^/context/detail/id/(\d+)/?$")
 _BARE_RE = re.compile(r"^\d+$")
+_SHORT_RE = re.compile(r"^/t/[A-Za-z0-9_-]+/?$")
 
 ResponseClass = Literal["success", "challenge", "dead", "error"]
 
@@ -40,6 +41,7 @@ def extract_sku(text: str) -> str | None:
 
     Короткие ссылки `/t/{code}` требуют резолва редиректа и здесь не
     поддерживаются: синхронный extract_sku не делает сетевых запросов.
+    Распознавание — `short_link_url()`, сетевой резолв — `OzonProvider.resolve_sku`.
     """
     value = text.strip()
     if not value:
@@ -55,6 +57,24 @@ def extract_sku(text: str) -> str | None:
     path = parts.path
     match = _PRODUCT_RE.match(path) or _LEGACY_RE.match(path)
     return match.group(1) if match else None
+
+
+def short_link_url(text: str) -> str | None:
+    """Короткая ссылка `ozon.ru/t/{code}` -> нормализованный https-URL, иначе None.
+
+    Сам редирект здесь не резолвится (чистая функция без I/O): сетевой резолв
+    под rate-limit делает `OzonProvider.resolve_sku` через свой транспорт.
+    """
+    value = text.strip()
+    if not value:
+        return None
+    try:
+        parts = urlsplit(value if "://" in value else f"https://{value}")
+    except ValueError:
+        return None
+    if parts.hostname not in _HOSTS or not _SHORT_RE.match(parts.path):
+        return None
+    return f"https://www.ozon.ru{parts.path}"
 
 
 def parse_price(value: str) -> int:
