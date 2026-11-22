@@ -53,6 +53,7 @@ from curl_cffi import requests
 from curl_cffi.const import CurlOpt
 
 from src.providers.ozon import classify_response
+from src.providers.ozon_antibot import detect_antibot
 from src.providers.ozon_browser import BrowserOptions
 from src.providers.ozon_identity import (
     BrowserMinter,
@@ -60,6 +61,7 @@ from src.providers.ozon_identity import (
     IdentityStore,
     StaticIdentityMinter,
 )
+from src.providers.ozon_page import PageParseError, parse_snapshot, product_not_found
 from src.providers.ozon_provider import PAGE_API, product_url
 from src.providers.ozon_transport import CurlIdentityTransport, InPageTransport, Transport
 
@@ -173,6 +175,37 @@ def _sku(segment: str) -> str:
     if not match:
         raise ValueError(f"сегмент без числового SKU: {segment!r}")
     return match.group(1)
+
+
+def _classify_attempt(sku: str, status: int, body: str) -> str:
+    """Классификация попытки gate тем же парсером, что использует провайдер.
+
+    Наличие `webPrice` само по себе не успех: gate требует полную карточку
+    (цена, название, SKU запрошенного товара). Иначе сломанная вёрстка или
+    редирект на другой товар могли бы дать ложный gate_passed=true.
+    """
+    if detect_antibot(status, body) is not None:
+        return "challenge"
+    if status == 404:
+        return "dead"
+    if status != 200:
+        return classify_response(status, body)
+    try:
+        page = json.loads(body)
+    except ValueError:
+        return "error"
+    if not isinstance(page, dict):
+        return "error"
+    # Явный error-виджет pdp — отсутствие товара даже без webPrice.
+    if product_not_found(page):
+        return "dead"
+    if classify_response(status, body) != "success":
+        return "error"
+    try:
+        parse_snapshot(sku, page)
+    except PageParseError:
+        return "error"
+    return "success"
 
 
 def _sha256(segments: list[str]) -> str:
@@ -493,7 +526,7 @@ def probe_sources(segments: list[str], proxy: str | None, out_dir: Path) -> None
             elif source.kind == "product":
                 cls = None
             else:
-                cls = classify_response(status, body)
+                cls = _classify_attempt(_sku(segment), status, body)
             record.update(
                 {
                     "status": status,
@@ -607,7 +640,7 @@ def run(args: argparse.Namespace) -> None:
                             status, body, exc = _request(source, session, segment)
                     except Exception as e:  # noqa: BLE001 — спайк логирует любые сбои
                         exc = type(e).__name__
-                    cls = classify_response(status, body) if exc is None else "error"
+                    cls = _classify_attempt(sku, status, body) if exc is None else "error"
                     record = {
                         "run_id": run_id,
                         "ts": _iso(_now()),

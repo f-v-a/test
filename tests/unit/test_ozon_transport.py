@@ -190,8 +190,14 @@ class FakeInPage:
         self.load_waits += 1
 
 
-def _inpage(monkeypatch: pytest.MonkeyPatch, page: FakeInPage, tmp_path: Path) -> InPageTransport:
-    transport = InPageTransport(BrowserOptions(profile_dir=tmp_path))
+def _inpage(
+    monkeypatch: pytest.MonkeyPatch,
+    page: FakeInPage,
+    tmp_path: Path,
+    *,
+    timeout: float = 20.0,
+) -> InPageTransport:
+    transport = InPageTransport(BrowserOptions(profile_dir=tmp_path), timeout=timeout)
 
     async def fake_get_page() -> FakeInPage:
         return page
@@ -209,6 +215,28 @@ async def test_inpage_fetch_success(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert "fetch(url" in script
     assert args["url"] == URL
     assert args["headers"]["x-o3-app-name"] == "dweb_client"
+
+
+async def test_inpage_fetch_has_request_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    page = FakeInPage([])
+    transport = _inpage(monkeypatch, page, tmp_path, timeout=12.5)
+    await transport.get(URL)
+    script, args = page.calls[0]
+    assert args["timeoutMs"] == 12500
+    assert "AbortSignal.timeout(timeoutMs)" in script
+
+
+async def test_inpage_timeout_is_transport_error_without_navigation_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    page = FakeInPage([RuntimeError("TimeoutError: signal timed out")])
+    transport = _inpage(monkeypatch, page, tmp_path)
+    with pytest.raises(TransportError, match="in-page fetch"):
+        await transport.get(URL)
+    assert len(page.calls) == 1
+    assert page.load_waits == 0
 
 
 async def test_inpage_retries_after_navigation(

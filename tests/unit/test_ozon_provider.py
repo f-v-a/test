@@ -110,10 +110,10 @@ async def test_success_fixture_returns_snapshot() -> None:
 
 async def test_request_url_is_encoded_entrypoint() -> None:
     provider, transport, _ = _provider([_ok()])
-    await provider.fetch(["123"])
+    await provider.fetch(["1574782712"])
     assert transport.urls == [
         "https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2?url="
-        "%2Fproduct%2F123%2F%3Foos_search%3Dfalse"
+        "%2Fproduct%2F1574782712%2F%3Foos_search%3Dfalse"
     ]
 
 

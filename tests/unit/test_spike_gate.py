@@ -5,11 +5,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from curl_cffi.const import CurlOpt
 
 from scripts.spike_ozon import (
     GATE_THRESHOLD,
     SOURCES,
+    _classify_attempt,
     _session,
     build_ca_bundle,
     load_segments,
@@ -168,3 +170,54 @@ def test_session_keeps_explicit_proxy(tmp_path: Path) -> None:
         assert CurlOpt.NOPROXY not in session.curl_options
     finally:
         session.close()
+
+
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "ozon"
+
+
+def _fixture_text(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("sku", "fixture", "status", "expected"),
+    [
+        ("1574782712", "product_success.json", 200, "success"),
+        ("3755501937", "product_out_of_stock.json", 200, "success"),
+        ("1", "product_unknown.json", 200, "dead"),
+        ("123", "product_success.json", 200, "error"),
+        ("123", "antibot_challenge.json", 403, "challenge"),
+        ("123", "antibot_block_nmk.json", 403, "challenge"),
+    ],
+)
+def test_classify_attempt_uses_real_fixtures(
+    sku: str, fixture: str, status: int, expected: str
+) -> None:
+    assert _classify_attempt(sku, status, _fixture_text(fixture)) == expected
+
+
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ({"webPrice-1": {"price": "100 ₽"}}, "error"),
+        (
+            {"webPrice-1": {"price": "бесплатно"}, "webProductHeading-1": {"title": "T"}},
+            "error",
+        ),
+        ({"userAdultModal-1": {"title": "18+"}}, "error"),
+    ],
+)
+def test_classify_attempt_rejects_incomplete_cards(states: dict[str, Any], expected: str) -> None:
+    body = json.dumps(
+        {
+            "pageInfo": {"pageType": "pdp"},
+            "widgetStates": {key: json.dumps(value) for key, value in states.items()},
+        }
+    )
+    assert _classify_attempt("123", 200, body) == expected
+
+
+def test_classify_attempt_404_and_non_json() -> None:
+    assert _classify_attempt("123", 404, "not found") == "dead"
+    assert _classify_attempt("123", 200, "not json") == "error"
+    assert _classify_attempt("123", 200, "[]") == "error"

@@ -19,7 +19,7 @@ import json
 from typing import Any, Final, cast
 
 from src.providers.base import ProductSnapshot
-from src.providers.ozon import parse_price
+from src.providers.ozon import extract_sku, parse_price
 
 #: Путь страницы товара: `oos_search=false` удерживает распроданный товар на
 #: своей странице — иначе Ozon подменяет её поисковой выдачей (omkarcloud).
@@ -145,6 +145,37 @@ def _in_stock(page: dict[str, Any], price_state: dict[str, Any]) -> bool:
     return True
 
 
+def _response_skus(page: dict[str, Any]) -> set[str]:
+    """Явные идентификаторы товара в ответе. Пустой набор = формат без метаданных."""
+    found: set[str] = set()
+    info = _as_dict(page.get("pageInfo"))
+    analytics = _as_dict(info.get("analyticsInfo"))
+    for value in (analytics.get("sku"),):
+        if isinstance(value, (str, int)) and str(value).isdigit():
+            found.add(str(value))
+    url = info.get("url")
+    if isinstance(url, str):
+        # pageInfo.url у Ozon относительный: /product/slug-123/?__rr=1.
+        absolute = f"https://www.ozon.ru{url}" if url.startswith("/") else url
+        sku = extract_sku(absolute)
+        if sku is not None:
+            found.add(sku)
+    for name, key in (("webGallery", "sku"), ("webStickyProducts", "sku")):
+        value = widget(page, name).get(key)
+        if isinstance(value, (str, int)) and str(value).isdigit():
+            found.add(str(value))
+    return found
+
+
+def _check_sku(sku: str, page: dict[str, Any]) -> None:
+    """Не выдавать цену редиректа/подменённой карточки за цену запрошенного SKU."""
+    other = _response_skus(page) - {sku}
+    if other:
+        raise PageParseError(
+            f"product {sku}: страница относится к другому товару ({', '.join(sorted(other))})"
+        )
+
+
 def parse_snapshot(sku: str, page: dict[str, Any]) -> ProductSnapshot:
     """JSON страницы товара -> снимок. `PageParseError`, если карточки нет.
 
@@ -153,6 +184,7 @@ def parse_snapshot(sku: str, page: dict[str, Any]) -> ProductSnapshot:
     """
     if is_adult_gate(page):
         raise PageParseError(f"product {sku}: 18+ заглушка вместо карточки")
+    _check_sku(sku, page)
     price_state = widget(page, "webPrice")
     price_kop = _optional_price(price_state, "price")
     if price_kop is None:

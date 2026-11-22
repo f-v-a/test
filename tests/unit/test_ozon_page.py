@@ -203,3 +203,51 @@ def test_not_found_requires_pdp_and_error_without_heading() -> None:
     # error + заголовок товара — страница живая (например, частично сломанная).
     page = _page({"error-1": {"title": "Ошибка"}, "webProductHeading-1": {"title": "T"}})
     assert product_not_found(page) is False
+
+
+def test_wrong_sku_real_fixture_is_rejected() -> None:
+    with pytest.raises(PageParseError, match="другому товару"):
+        parse_snapshot("123", _fixture("product_success.json"))
+
+
+def test_matching_page_info_url_is_accepted() -> None:
+    page = _page({"webPrice-1": {"price": "100 ₽"}, "webProductHeading-1": {"title": "T"}})
+    page["pageInfo"]["url"] = "/product/some-title-123/?__rr=1"
+    assert parse_snapshot("123", page).sku == "123"
+
+
+@pytest.mark.parametrize(
+    ("page_info", "states"),
+    [
+        ({"analyticsInfo": {"sku": 999}}, {}),
+        ({}, {"webGallery-1": {"sku": "999"}}),
+        ({}, {"webStickyProducts-1": {"sku": 999}}),
+        ({"url": "/product/999/"}, {}),
+    ],
+)
+def test_explicit_sku_mismatch_is_rejected(
+    page_info: dict[str, Any], states: dict[str, Any]
+) -> None:
+    page = _page(
+        {
+            "webPrice-1": {"price": "100 ₽"},
+            "webProductHeading-1": {"title": "T"},
+            **states,
+        }
+    )
+    page["pageInfo"].update(page_info)
+    with pytest.raises(PageParseError, match="другому товару"):
+        parse_snapshot("123", page)
+
+
+def test_conflicting_response_skus_are_rejected() -> None:
+    page = _page(
+        {
+            "webPrice-1": {"price": "100 ₽"},
+            "webProductHeading-1": {"title": "T"},
+            "webGallery-1": {"sku": "123"},
+            "webStickyProducts-1": {"sku": "999"},
+        }
+    )
+    with pytest.raises(PageParseError, match="другому товару"):
+        parse_snapshot("123", page)

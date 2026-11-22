@@ -1,6 +1,7 @@
 """Тесты конфига: дефолты, env-переопределения, парсинг ADMIN_IDS."""
 
 import pytest
+from pydantic import ValidationError
 
 from src.core.config import Settings
 
@@ -50,3 +51,55 @@ def test_empty_optional_values_become_none(monkeypatch: pytest.MonkeyPatch) -> N
     s = Settings(_env_file=None)
     assert s.ozon_proxy_url is None
     assert s.ozon_api_key is None
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("OZON_RPS", "0"),
+        ("OZON_RPS", "-0.1"),
+        ("OZON_RPS", "0.51"),
+        ("OZON_TIMEOUT_SECONDS", "9"),
+        ("OZON_TIMEOUT_SECONDS", "21"),
+        ("OZON_MAX_ATTEMPTS", "0"),
+        ("OZON_IDENTITY_TTL_SECONDS", "0"),
+    ],
+)
+def test_invalid_ozon_limits_are_rejected(
+    name: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("OZON_RPS", "0.5"), ("OZON_TIMEOUT_SECONDS", "10"), ("OZON_TIMEOUT_SECONDS", "20")],
+)
+def test_ozon_limit_boundaries_are_allowed(
+    name: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(name, value)
+    Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("cookie", "user_agent"),
+    [("abt_data=token", ""), ("", "UA/1.0")],
+)
+def test_static_identity_requires_cookie_and_user_agent(
+    cookie: str, user_agent: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OZON_COOKIE", cookie)
+    monkeypatch.setenv("OZON_USER_AGENT", user_agent)
+    with pytest.raises(ValidationError, match="заданы вместе"):
+        Settings(_env_file=None)
+
+
+def test_static_identity_pair_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OZON_COOKIE", "abt_data=token")
+    monkeypatch.setenv("OZON_USER_AGENT", "UA/1.0")
+    settings = Settings(_env_file=None)
+    assert settings.ozon_cookie == "abt_data=token"
+    assert settings.ozon_user_agent == "UA/1.0"

@@ -4,9 +4,9 @@
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,16 +30,16 @@ class Settings(BaseSettings):
     # headless — все запросы fetch-ем из живой вкладки Chromium;
     # api — платный parser-API (не реализован, решение владельца).
     ozon_strategy: Literal["http", "headless", "api"] = "http"
-    ozon_rps: float = 0.5
+    ozon_rps: float = Field(default=0.5, gt=0.0, le=0.5)
     ozon_proxy_url: str | None = None
     ozon_api_key: str | None = None
-    ozon_timeout_seconds: float = 20.0
-    ozon_max_attempts: int = 3
+    ozon_timeout_seconds: float = Field(default=20.0, ge=10.0, le=20.0)
+    ozon_max_attempts: int = Field(default=3, ge=1)
     # Идентичность антибота: cookie владельца вместо браузерного mint.
     # Работает только с того же egress-IP, где cookie получена.
     ozon_cookie: str | None = None
     ozon_user_agent: str | None = None
-    ozon_identity_ttl_seconds: float = 43200.0
+    ozon_identity_ttl_seconds: float = Field(default=43200.0, gt=0.0)
     ozon_profile_dir: str = ".ozon-profile"
     ozon_browser_headless: bool = True
     ozon_browser_mac_disguise: bool = True
@@ -73,6 +73,13 @@ class Settings(BaseSettings):
         if value == "":
             return None
         return value
+
+    @model_validator(mode="after")
+    def _identity_pair(self) -> Self:
+        """Статическая идентичность задаётся парой cookie + UA, иначе браузерный mint."""
+        if (self.ozon_cookie is None) != (self.ozon_user_agent is None):
+            raise ValueError("OZON_COOKIE и OZON_USER_AGENT должны быть заданы вместе")
+        return self
 
 
 @lru_cache
