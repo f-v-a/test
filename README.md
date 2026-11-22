@@ -188,12 +188,20 @@ class ProductSnapshot:
 только собственные товары продавца; для трекера не подходит, не использовать).
 
 **M1 начинается со spike (1–2 дня). Лестница стратегий:**
-1. **HTTP с TLS-имперсонацией**: `curl_cffi` (`impersonate="chrome"`), браузерные
-   заголовки, cookie-jar. Эндпоинт-кандидат (⚠️ UNOFFICIAL, проверить живым запросом):
-   `https://api.ozon.ru/composer-api.bx/page/json/v2?url=/product/{slug}-{id}/`
-   → JSON с `widgetStates`.
-2. **Headless-браузер**: Playwright (+ stealth-настройки) как отдельный fetcher.
-   Тяжелее по ресурсам, обычно стабильнее против challenge.
+1. **HTTP с TLS-имперсонацией + идентичность антибота** (реализовано; метод
+   omkarcloud/ozon-scraper + eduard256/shopper-mcp): Chromium один раз проходит
+   антибот на «дешёвом» JSON-сиде и отдаёт cookie `abt_data` + UA; дальше
+   `curl_cffi` (`impersonate="chrome"`) реплеит эту идентичность **с того же
+   egress-IP**. Эндпоинт (⚠️ UNOFFICIAL, формат подтверждён фикстурами):
+   `https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2?url=/product/{sku}/`
+   → JSON с `widgetStates`. Идентичность: браузерный mint на хосте
+   (extra `[browser]`) или `OZON_COOKIE`/`OZON_USER_AGENT` владельца — строго
+   с того же выхода, где она получена. На block/captcha-варианте антибота
+   mint отказывает сразу: браузер помогает только на JS-challenge.
+2. **Headless-браузер** (реализовано): patchright (форк Playwright без утечек
+   автоматизации), все запросы — `fetch` из живой вкладки Ozon
+   (`OZON_STRATEGY=headless`). Тяжелее по ресурсам, зато антибот видит
+   настоящий браузер на каждом запросе.
 3. **Платный parser-API**: быстрый путь к MVP, себестоимость на запрос.
    Подключать только по явному решению владельца (влияет на тарифы).
 
@@ -205,16 +213,18 @@ class ProductSnapshot:
 Раннер: `scripts/spike_ozon.py`. Логи/манифесты — в `spike_out/` (ignored).
 ```bash
 python scripts/spike_ozon.py --probe --no-proxy         # разовая проверка источников без прокси
-python scripts/spike_ozon.py --source composer --hours 24 --no-proxy
+python scripts/spike_ozon.py --source identity --hours 24 --no-proxy   # метод идентичности
+python scripts/spike_ozon.py --source composer --hours 24 --no-proxy   # legacy прямой источник
 python scripts/spike_ozon.py --resume                   # продолжить тот же run
-python scripts/spike_ozon.py --report --source composer
+python scripts/spike_ozon.py --report --source identity
 ```
-Источники gate: `composer`, `www-composer`, `entrypoint`, `api-entrypoint`,
-`mobile-composer`, `mobile-entrypoint`. `--probe` дополнительно смотрит
-`product`/`mobile-product`, но они не являются gate-источниками. Флаг `--no-proxy`
-запрещает прокси и игнорирует `OZON_PROXY_URL`; без явного прокси env
-`HTTP(S)_PROXY` также отключаются. Smoke (`--hours < 24`) никогда не получает
-`gate_passed=true`.
+Источники gate: `identity` (curl-реплей идентичности), `identity-inpage`
+(fetch из вкладки Chromium), а также legacy-прямые `composer`, `www-composer`,
+`entrypoint`, `api-entrypoint`, `mobile-composer`, `mobile-entrypoint`.
+`--probe` дополнительно смотрит `product`/`mobile-product`, но они не являются
+gate-источниками. Флаг `--no-proxy` запрещает прокси и игнорирует
+`OZON_PROXY_URL`; без явного прокси env `HTTP(S)_PROXY` также отключаются.
+Smoke (`--hours < 24`) никогда не получает `gate_passed=true`.
 
 Строгий вердикт требует: 50 SKU, окно ≥ 24 ч, завершённый run, ≥ 90 % успешных
 попыток, хотя бы один success по каждому SKU, отсутствие разрывов покрытия больше
@@ -421,17 +431,25 @@ FEATURE_WB=false
 
 ### M1 — Spike Ozon + провайдер + треки (3–5 дней)
 
-Текущий статус: **gate не пройден**, публичные источники из песочницы отвечают
-`403`. Подготовлены чистые помощники Ozon и строгий gate-раннер; трекинг/алерты
-не включены до подтверждённого стабильного fetch.
+Текущий статус: **gate не пройден** — egress песочницы получает жёсткую
+IP-блокировку антибота (`fab_nmk_*`, вариант block) на всех источниках.
+Метод идентичности (браузерный mint `abt_data` + curl-реплей / fetch из вкладки)
+реализован полностью, интегрирован в gate-раннер (`identity`/`identity-inpage`)
+и проверен живьём до предела, возможного с этого IP: mint корректно отказывает
+на block-варианте, вкладка открывается и доставляет реальные ответы антибота.
+Для gate ≥ 90 % на 50 SKU / 24 ч нужен **российский egress самого раннера**
+(RU-VPS без прокси либо одобренный владельцем прокси/parser-API) — порядок
+запуска в DECISIONS.md. Трекинг/алерты не включены до подтверждённого fetch.
 
 - [ ] Spike проведён, стратегия выбрана, **gate ≥ 90 % на 50 SKU / 24 ч пройден**,
       результат в DECISIONS.md. Не пройден — стоп, эскалация владельцу.
-- [ ] Фикстуры записаны: успешный ответ, challenge, 404. Формат полей подтверждён.
+- [ ] Фикстуры записаны: успешный ответ, challenge, 404. Формат полей подтверждён
+      (есть MIT-фикстуры omkarcloud + живой block; наша success-фикстура — на gate).
 - [ ] Добавление по полной ссылке, короткой ссылке, legacy-ссылке и по ID;
       карточка товара с двумя ценами и наличием.
 - [ ] `/list` с кнопками (цель/пауза/удалить), лимит FREE enforced.
-- [ ] Юнит-тесты: extract_sku, parse_price, детект challenge; контракт-тесты провайдера.
+- [x] Юнит-тесты: extract_sku, parse_price, детект challenge; контракт-тесты
+      провайдера, транспортов, mint, разбора страницы и gate-раннера.
 
 ### M2 — Проверки и алерты (2–3 дня)
 - [ ] Cron выбирает due-товары по мин-интервалу тарифов; per-SKU rate-limit; backoff;
