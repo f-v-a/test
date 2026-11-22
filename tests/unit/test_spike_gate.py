@@ -5,7 +5,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from scripts.spike_ozon import GATE_THRESHOLD, load_segments, summarize
+from curl_cffi.const import CurlOpt
+
+from scripts.spike_ozon import (
+    GATE_THRESHOLD,
+    SOURCES,
+    _session,
+    build_ca_bundle,
+    load_segments,
+    summarize,
+)
 
 START = datetime(2026, 11, 22, tzinfo=UTC)
 
@@ -135,3 +144,27 @@ def test_load_segments_rejects_duplicates(tmp_path: Path) -> None:
         assert "дубликаты" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_gate_sources_include_direct_composer_variants() -> None:
+    for name in ("www-composer", "api-entrypoint"):
+        assert name in SOURCES
+        assert SOURCES[name].kind == "composer"
+
+
+def test_session_disables_env_proxies_without_explicit_proxy(tmp_path: Path) -> None:
+    bundle = build_ca_bundle(tmp_path)
+    session = _session(SOURCES["composer"], bundle, None)
+    try:
+        assert session.curl_options.get(CurlOpt.NOPROXY) == "*"
+    finally:
+        session.close()
+
+
+def test_session_keeps_explicit_proxy(tmp_path: Path) -> None:
+    bundle = build_ca_bundle(tmp_path)
+    session = _session(SOURCES["composer"], bundle, "http://127.0.0.1:9")
+    try:
+        assert CurlOpt.NOPROXY not in session.curl_options
+    finally:
+        session.close()

@@ -204,14 +204,17 @@ class ProductSnapshot:
 
 Раннер: `scripts/spike_ozon.py`. Логи/манифесты — в `spike_out/` (ignored).
 ```bash
-python scripts/spike_ozon.py --probe                    # разовая проверка источников
-python scripts/spike_ozon.py --source composer --hours 24
+python scripts/spike_ozon.py --probe --no-proxy         # разовая проверка источников без прокси
+python scripts/spike_ozon.py --source composer --hours 24 --no-proxy
 python scripts/spike_ozon.py --resume                   # продолжить тот же run
 python scripts/spike_ozon.py --report --source composer
 ```
-Источники gate: `composer`, `entrypoint`, `mobile-composer`, `mobile-entrypoint`.
-`--probe` дополнительно смотрит `product`/`mobile-product`, но они не являются
-gate-источниками. Smoke (`--hours < 24`) никогда не получает `gate_passed=true`.
+Источники gate: `composer`, `www-composer`, `entrypoint`, `api-entrypoint`,
+`mobile-composer`, `mobile-entrypoint`. `--probe` дополнительно смотрит
+`product`/`mobile-product`, но они не являются gate-источниками. Флаг `--no-proxy`
+запрещает прокси и игнорирует `OZON_PROXY_URL`; без явного прокси env
+`HTTP(S)_PROXY` также отключаются. Smoke (`--hours < 24`) никогда не получает
+`gate_passed=true`.
 
 Строгий вердикт требует: 50 SKU, окно ≥ 24 ч, завершённый run, ≥ 90 % успешных
 попыток, хотя бы один success по каждому SKU, отсутствие разрывов покрытия больше

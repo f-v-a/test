@@ -11,8 +11,10 @@
     python scripts/spike_ozon.py --report                         # сводка по run
     python scripts/spike_ozon.py --probe                          # разовая проверка источников
 
-Прокси (опционально): OZON_PROXY_URL или --proxy. В манифест пишется только
-факт наличия прокси, сам URL/секреты не логируются.
+Прокси (опционально): OZON_PROXY_URL или --proxy. Флаг --no-proxy запрещает
+прокси и игнорирует OZON_PROXY_URL. Без явно заданного прокси раннер также
+отключает env HTTP(S)_PROXY через NOPROXY, чтобы случайный прокси не использовался.
+В манифест пишется только факт наличия прокси, сам URL/секреты не логируются.
 
 Важно: api.ozon.ru отдаёт сертификат УЦ Минцифры РФ — раннер собирает
 CA-бандл certifi + scripts/certs/russian_trusted_root_ca.crt.
@@ -60,8 +62,14 @@ class Source:
 
 SOURCES: dict[str, Source] = {
     "composer": Source("composer", "https://api.ozon.ru/composer-api.bx/page/json/v2", "composer"),
+    "www-composer": Source(
+        "www-composer", "https://www.ozon.ru/api/composer-api.bx/page/json/v2", "composer"
+    ),
     "entrypoint": Source(
         "entrypoint", "https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2", "composer"
+    ),
+    "api-entrypoint": Source(
+        "api-entrypoint", "https://api.ozon.ru/entrypoint-api.bx/page/json/v2", "composer"
     ),
     "mobile-composer": Source(
         "mobile-composer", "https://api.ozon.ru/composer-api.bx/page/json/v2", "composer", True
@@ -301,12 +309,16 @@ def print_summary(run_dir: Path) -> None:
 
 
 def _session(source: Source, bundle: str, proxy: str | None) -> requests.Session[requests.Response]:
+    curl_options: dict[CurlOpt, Any] = {CurlOpt.CAINFO: bundle}
+    if proxy is None:
+        # Запрещаем libcurl использовать HTTP(S)_PROXY/ALL_PROXY из окружения.
+        curl_options[CurlOpt.NOPROXY] = "*"
     session: requests.Session[requests.Response] = requests.Session(
         impersonate="chrome",
         timeout=REQUEST_TIMEOUT_SECONDS,
         verify=True,
         proxy=proxy,
-        curl_options={CurlOpt.CAINFO: bundle},
+        curl_options=curl_options,
     )
     session.headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"})
     if source.mobile:
@@ -340,6 +352,7 @@ def probe_sources(segments: list[str], proxy: str | None, out_dir: Path) -> None
             "source": source.name,
             "sku": _sku(segment),
             "proxy_configured": proxy is not None,
+            "env_proxies_disabled": proxy is None,
         }
         try:
             status, body, _ = _request(source, session, segment)
@@ -365,7 +378,7 @@ def run(args: argparse.Namespace) -> None:
     global _STOP
     _STOP = False
     segments = load_segments(Path(args.skus))
-    proxy = args.proxy or os.environ.get("OZON_PROXY_URL") or None
+    proxy = None if args.no_proxy else (args.proxy or os.environ.get("OZON_PROXY_URL") or None)
     run_dir = Path(args.run_dir) if args.run_dir else ROOT.parent / "spike_out" / args.source
     manifest_path = run_dir / "manifest.json"
     state_path = run_dir / "state.json"
@@ -407,6 +420,7 @@ def run(args: argparse.Namespace) -> None:
             "sku_sha256": _sha256(segments),
             "impersonate": "chrome",
             "proxy_configured": proxy is not None,
+            "no_proxy_requested": bool(args.no_proxy),
         }
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(manifest_path, manifest)
@@ -494,11 +508,18 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=2.0, help="минимум 2 с")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--proxy", default=None)
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="запретить прокси, включая OZON_PROXY_URL и env HTTP(S)_PROXY",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--report", action="store_true", help="только сводка по run")
     mode.add_argument("--resume", action="store_true", help="продолжить существующий run")
     mode.add_argument("--probe", action="store_true", help="разовая проверка всех источников")
     args = parser.parse_args()
+    if args.no_proxy and args.proxy:
+        parser.error("--no-proxy нельзя использовать вместе с --proxy")
     if args.hours <= 0:
         parser.error("--hours должен быть > 0")
     if args.report:
@@ -507,7 +528,7 @@ def main() -> None:
         return
     if args.probe:
         run_dir = Path(args.run_dir) if args.run_dir else ROOT.parent / "spike_out" / "probe"
-        proxy = args.proxy or os.environ.get("OZON_PROXY_URL") or None
+        proxy = None if args.no_proxy else (args.proxy or os.environ.get("OZON_PROXY_URL") or None)
         probe_sources(load_segments(Path(args.skus)), proxy, run_dir)
         return
     signal.signal(signal.SIGTERM, _handle_stop)
