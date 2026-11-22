@@ -23,7 +23,13 @@ from src.providers.ozon_transport import TransportResponse
 START = datetime(2026, 11, 22, tzinfo=UTC)
 
 SUCCESS_BODY = json.dumps(
-    {"widgetStates": {"webPrice-1": json.dumps({"price": "1 234 ₽"})}},
+    {
+        "pageInfo": {"pageType": "pdp", "analyticsInfo": {"sku": 123456789}},
+        "widgetStates": {
+            "webPrice-1": json.dumps({"price": "1 234 ₽"}),
+            "webProductHeading-1": json.dumps({"title": "Тестовый товар"}, ensure_ascii=False),
+        },
+    },
     ensure_ascii=False,
 )
 
