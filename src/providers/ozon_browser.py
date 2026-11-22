@@ -144,18 +144,19 @@ async def open_past_antibot(
 
     Антибот отвечает 4xx и перезагружает страницу сам; ждём первый
     навигационный ответ со статусом < 400 (shopper-mcp `openPastAntibot`).
+    Ожидание — `page.expect_response` (реальный API Playwright/patchright):
+    контекст ловит ответ и во время goto, и после него, до выхода из блока.
     """
-    passed = page.wait_for_response(
-        lambda response: (
-            response.request.is_navigation_request()
-            and response.frame == page.main_frame
-            and response.status < 400
-        ),
-        timeout=timeout_ms,
-    )
-    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     try:
-        await passed
+        async with page.expect_response(
+            lambda response: (
+                response.request.is_navigation_request()
+                and response.frame == page.main_frame
+                and response.status < 400
+            ),
+            timeout=timeout_ms,
+        ):
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     except Exception as exc:
         title = str(await page.title())
         kind = detect_antibot(403, str(await page.content()))
