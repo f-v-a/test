@@ -20,11 +20,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Mint идентичности Ozon реальным Chromium (см. src/providers/ozon_identity.py).
+# Нужен только там, где идентичность добывается браузером; режим статической
+# cookie (OZON_COOKIE/OZON_USER_AGENT) работает без него.
+browser = [
+    "patchright>=1.64,<2",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.24,<2",
     "ruff>=0.6",
     "mypy>=1.11",
+    "patchright>=1.64,<2",
 ]
 
 [tool.setuptools.packages.find]
