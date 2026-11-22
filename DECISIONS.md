@@ -213,3 +213,53 @@
     IPv6-вариант недоступен: у `www/api/m.ozon.ru` нет AAAA-записей из песочницы.
     Вывод прежний: прямой бесплатный fetch с текущего egress невозможен; нужен
     российский egress самого раннера (RU-VPS) без прокси.
+
+## 2026-11-22 — M1, метод идентичности: интеграция в gate-раннер и живая проверка
+
+35. **Gate-раннер освоил метод идентичности: источники `identity` и `identity-inpage`.**
+    `scripts/spike_ozon.py` использует транспорты провайдера
+    (`CurlIdentityTransport` / `InPageTransport`) через sync→async-мост:
+    выделенный event-loop-поток на весь run (идентичность кэшируется, вкладка
+    переиспользуется). Rate-limit делает сам раннер (≥ 2 с + джиттер), поэтому
+    транспорты берутся напрямую, без OzonProvider с его pace/backoff. Сбой
+    mint/сети получает экспоненциальный backoff как challenge — заблокированный
+    выход не долбится каждые 2 с. Манифест фиксирует `kind` и `identity_mode`
+    (browser-mint / static-cookie), секреты не логируются. Идентичность —
+    браузерный mint на этом же хосте либо `OZON_COOKIE`/`OZON_USER_AGENT`
+    (СТРОГО тот же egress-IP, где cookie получена). Причина: gate обязан
+    гоняться выбранным методом; legacy-источники из песочницы все 403.
+
+36. **Живая проверка всей цепи из новой песочницы (egress 47.245.81.246).**
+    Все прямые источники снова 403 `fab_nmk_*` (block, без challengeURL).
+    `BrowserMinter` запускает Chromium, применяет Mac-маскировку, доходит до
+    сида и сразу отказывает в mint на block-варианте (как спроектировано —
+    лишние запросы только сильнее флагуют IP). `InPageTransport` открывает
+    вкладку, in-page fetch возвращает реальный антибот-инцидент (403 JSON);
+    провайдер классифицирует его как антибот и уходит в backoff. Вывод прежний:
+    **gate требует российского egress самого раннера** (RU-VPS без прокси
+    либо явно одобренные владельцем прокси/parser-API).
+
+37. **Живой пробник поймал реальный баг headless-транспорта:
+    `page.wait_for_response` не существует в API Playwright/patchright.**
+    `open_past_antibot` переписан на `page.expect_response` (async-контекст:
+    ловит успешную навигацию и во время goto, и после него). Фейковые страницы
+    в тестах повторяли ошибочное имя метода, поэтому юнит-тесты баг не ловили.
+    Добавлен `tests/unit/test_ozon_browser.py`: фейки с семантикой реального
+    API + контракт-тест имён методов против `patchright.async_api.Page`.
+    Проверено живьём: после фикса вкладка открывается, fetch доставляет ответ.
+
+38. **Smoke-прогоны обоих identity-источников завершили полный цикл:**
+    манифест → JSONL-лог → backoff 2/4/8 с → строгий вердикт
+    `gate_passed=false` (reasons: sku_coverage, success_rate,
+    gate_window_too_short). Smoke никогда не проходит gate; на заблокированном
+    egress метод идентичности не даёт ни одного success — ожидаемо и честно.
+
+39. **Порядок запуска gate на RU-egress (владелец), без прокси:**
+    `pip install -e ".[dev,browser]"` + `patchright install chromium`;
+    `python scripts/spike_ozon.py --probe --no-proxy` (identity должен дать
+    success); `python scripts/spike_ozon.py --source identity --hours 24
+    --no-proxy`; `--report --source identity`. Альтернативы:
+    `--source identity-inpage` (все запросы fetch-ем из вкладки) и статическая
+    идентичность `OZON_COOKIE`/`OZON_USER_AGENT`, снятая в браузере на том же
+    выходе. Там же записывается наша success-фикстура. До прохождения gate
+    трекинг/алерты не включаются (README §5/§13).
