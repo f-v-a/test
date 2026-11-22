@@ -32,7 +32,7 @@ from urllib.parse import quote
 import structlog
 
 from src.providers.base import Marketplace, ProductSnapshot, ProviderUnavailable
-from src.providers.ozon import extract_sku
+from src.providers.ozon import extract_sku, short_link_url
 from src.providers.ozon_antibot import describe, detect_antibot
 from src.providers.ozon_browser import BrowserOptions
 from src.providers.ozon_identity import (
@@ -101,6 +101,31 @@ class OzonProvider:
 
     def extract_sku(self, text: str) -> str | None:
         return extract_sku(text)
+
+    async def resolve_sku(self, text: str) -> str | None:
+        """Ссылка/ID -> SKU, включая резолв коротких `ozon.ru/t/{code}` под rate-limit.
+
+        Полная/legacy-ссылка и голый ID распознаются без сети. Короткая ссылка
+        требует одного запроса: редирект следует сам транспорт, SKU берётся из
+        конечного URL (тело страницы не разбирается). Challenge/блокировка —
+        `ProviderUnavailable`, не None; нераспознанная ссылка — None.
+        """
+        sku = extract_sku(text)
+        if sku is not None:
+            return sku
+        short = short_link_url(text)
+        if short is None:
+            return None
+        await self._pace()
+        response = await self._transport.get(short)
+        kind = detect_antibot(response.status, response.body)
+        if kind is not None:
+            raise ProviderUnavailable(
+                f"Ozon short-link {short}: {describe(kind)} (HTTP {response.status})"
+            )
+        if response.status == 404:
+            return None
+        return extract_sku(response.url) if response.url else None
 
     async def fetch(self, skus: Sequence[str]) -> dict[str, ProductSnapshot]:
         """Найденные SKU -> снимок. Challenge/блокировка — `ProviderUnavailable`.
