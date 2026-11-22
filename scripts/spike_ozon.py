@@ -53,6 +53,7 @@ from curl_cffi import requests
 from curl_cffi.const import CurlOpt
 
 from src.providers.ozon import classify_response
+from src.providers.ozon_antibot import detect_antibot
 from src.providers.ozon_browser import BrowserOptions
 from src.providers.ozon_identity import (
     BrowserMinter,
@@ -183,17 +184,26 @@ def _classify_attempt(sku: str, status: int, body: str) -> str:
     (цена, название, SKU запрошенного товара). Иначе сломанная вёрстка или
     редирект на другой товар могли бы дать ложный gate_passed=true.
     """
-    cls = classify_response(status, body)
-    if cls != "success":
-        return cls
+    if detect_antibot(status, body) is not None:
+        return "challenge"
+    if status == 404:
+        return "dead"
+    if status != 200:
+        return classify_response(status, body)
     try:
         page = json.loads(body)
-        if not isinstance(page, dict):
-            return "error"
-        if product_not_found(page):
-            return "dead"
+    except ValueError:
+        return "error"
+    if not isinstance(page, dict):
+        return "error"
+    # Явный error-виджет pdp — отсутствие товара даже без webPrice.
+    if product_not_found(page):
+        return "dead"
+    if classify_response(status, body) != "success":
+        return "error"
+    try:
         parse_snapshot(sku, page)
-    except (ValueError, PageParseError):
+    except PageParseError:
         return "error"
     return "success"
 
