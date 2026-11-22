@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from src.providers.ozon import classify_response, extract_sku, is_challenge, parse_price
+from src.providers.ozon import (
+    classify_response,
+    extract_sku,
+    is_challenge,
+    parse_price,
+    short_link_url,
+)
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "ozon"
 
@@ -93,3 +99,40 @@ def test_classify_404_is_dead_not_challenge() -> None:
 
 def test_classify_429_is_challenge() -> None:
     assert classify_response(429, "") == "challenge"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("https://ozon.ru/t/AbC123", "https://www.ozon.ru/t/AbC123"),
+        ("https://www.ozon.ru/t/AbC123/", "https://www.ozon.ru/t/AbC123/"),
+        ("ozon.ru/t/xY_z-9", "https://www.ozon.ru/t/xY_z-9"),
+        ("https://m.ozon.ru/t/ABC", "https://www.ozon.ru/t/ABC"),
+    ],
+)
+def test_short_link_url_supported(text: str, expected: str) -> None:
+    assert short_link_url(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   ",
+        "https://www.ozon.ru/product/foo-123/",
+        "123456789",
+        "https://evil-ozon.ru/t/ABC",
+        "https://example.com/t/ABC",
+        "https://www.ozon.ru/t/",
+        "https://www.ozon.ru/t/ABC/extra",
+        "https://www.ozon.ru/category/foo-123/",
+    ],
+)
+def test_short_link_url_unsupported(text: str) -> None:
+    assert short_link_url(text) is None
+
+
+def test_short_link_is_not_a_sku() -> None:
+    # Короткая ссылка не даёт SKU синхронно: нужен сетевой резолв редиректа.
+    assert extract_sku("https://ozon.ru/t/AbC123") is None
+    assert short_link_url("https://ozon.ru/t/AbC123") is not None
