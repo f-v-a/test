@@ -19,6 +19,6 @@ jobs:
       - name: Ruff (format)
         run: ruff format --check .
       - name: Mypy
-        run: mypy src tests
+        run: mypy src tests scripts/spike_ozon.py
       - name: Pytest (без БД, без сети, без контейнеров)
         run: pytest

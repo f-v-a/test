@@ -202,6 +202,22 @@ class ProductSnapshot:
 выбор: другая стратегия / платный API / смена первого маркетплейса.
 Не строить M2+ на нестабильном fetch.
 
+Раннер: `scripts/spike_ozon.py`. Логи/манифесты — в `spike_out/` (ignored).
+```bash
+python scripts/spike_ozon.py --probe                    # разовая проверка источников
+python scripts/spike_ozon.py --source composer --hours 24
+python scripts/spike_ozon.py --resume                   # продолжить тот же run
+python scripts/spike_ozon.py --report --source composer
+```
+Источники gate: `composer`, `entrypoint`, `mobile-composer`, `mobile-entrypoint`.
+`--probe` дополнительно смотрит `product`/`mobile-product`, но они не являются
+gate-источниками. Smoke (`--hours < 24`) никогда не получает `gate_passed=true`.
+
+Строгий вердикт требует: 50 SKU, окно ≥ 24 ч, завершённый run, ≥ 90 % успешных
+попыток, хотя бы один success по каждому SKU, отсутствие разрывов покрытия больше
+`backoff_cap + interval + timeout`. Манифест фиксирует run/source/SKU-лист;
+смешивание разных run в одном логу запрещается.
+
 **Ссылки и SKU:**
 - `ozon.ru/product/{slug}-{id}/` → ID — последний числовой сегмент:
   regex `/product/(?:[^/]*-)?(\d+)/?`
@@ -401,6 +417,11 @@ FEATURE_WB=false
 - [x] Конфиг, structlog, alembic init, Makefile, CI (ruff+mypy+pytest) зелёный. Без Docker.
 
 ### M1 — Spike Ozon + провайдер + треки (3–5 дней)
+
+Текущий статус: **gate не пройден**, публичные источники из песочницы отвечают
+`403`. Подготовлены чистые помощники Ozon и строгий gate-раннер; трекинг/алерты
+не включены до подтверждённого стабильного fetch.
+
 - [ ] Spike проведён, стратегия выбрана, **gate ≥ 90 % на 50 SKU / 24 ч пройден**,
       результат в DECISIONS.md. Не пройден — стоп, эскалация владельцу.
 - [ ] Фикстуры записаны: успешный ответ, challenge, 404. Формат полей подтверждён.

@@ -23,4 +23,4 @@ test:
 lint:
 	$(VENV)/bin/ruff check .
 	$(VENV)/bin/ruff format --check .
-	$(VENV)/bin/mypy src tests
+	$(VENV)/bin/mypy src tests scripts/spike_ozon.py
