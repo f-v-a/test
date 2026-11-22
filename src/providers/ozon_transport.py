@@ -42,7 +42,7 @@ IN_PAGE_HEADERS: Final = {
 _FETCH_SCRIPT: Final = """
 async ({ url, headers }) => {
     const response = await fetch(url, { method: 'GET', headers, credentials: 'include' });
-    return { status: response.status, text: await response.text() };
+    return { status: response.status, text: await response.text(), url: response.url };
 }
 """
 
@@ -55,6 +55,9 @@ class TransportError(ProviderUnavailable):
 class TransportResponse:
     status: int
     body: str
+    #: Конечный URL после редиректов (curl следует им сам, fetch — тоже).
+    #: Нужен для резолва коротких ссылок ozon.ru/t/{code} -> /product/{sku}/.
+    url: str = ""
 
 
 class Transport(Protocol):
@@ -112,7 +115,9 @@ class CurlIdentityTransport:
         if detect_antibot(response.status_code, body) is not None:
             # Идентичность больше не проходит: следующий запрос добудет новую.
             self._identities.invalidate(identity)
-        return TransportResponse(status=response.status_code, body=body)
+        return TransportResponse(
+            status=response.status_code, body=body, url=str(response.url or "")
+        )
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -186,7 +191,9 @@ class InPageTransport:
                 raise TransportError(
                     f"in-page fetch после перезагрузки: {retry_exc}"
                 ) from retry_exc
-        return TransportResponse(status=int(result["status"]), body=str(result["text"]))
+        return TransportResponse(
+            status=int(result["status"]), body=str(result["text"]), url=str(result.get("url", ""))
+        )
 
     async def _close_locked(self) -> None:
         if self._context is not None:
