@@ -5,11 +5,19 @@
 на challenge/429. Пишет JSONL-лог и считает строгий gate-вердикт.
 
 Запуск (из корня репо, venv активен):
-    python scripts/spike_ozon.py --source composer --hours 24
-    python scripts/spike_ozon.py --source composer --hours 0.01   # smoke, не gate
+    python scripts/spike_ozon.py --source identity --hours 24     # метод идентичности (M1)
+    python scripts/spike_ozon.py --source composer --hours 24     # прямой источник (legacy)
+    python scripts/spike_ozon.py --source identity --hours 0.01   # smoke, не gate
     python scripts/spike_ozon.py --resume                         # продолжить тот же run
     python scripts/spike_ozon.py --report                         # сводка по run
     python scripts/spike_ozon.py --probe                          # разовая проверка источников
+
+Источники `identity` (curl_cffi-реплей идентичности, прошедшей антибот) и
+`identity-inpage` (fetch из живой вкладки Chromium) используют транспорты
+провайдера (src/providers/ozon_transport.py). Идентичность добывается браузером
+на этом же хосте (extra [browser] + `patchright install chromium`) либо берётся
+готовой из OZON_COOKIE/OZON_USER_AGENT — ОБЯЗАТЕЛЬНО с того же egress-IP, где
+она получена. OZON_BROWSER_HEADLESS=false показывает окно браузера (отладка).
 
 Прокси (опционально): OZON_PROXY_URL или --proxy. Флаг --no-proxy запрещает
 прокси и игнорирует OZON_PROXY_URL. Без явно заданного прокси раннер также
@@ -23,6 +31,7 @@ CA-бандл certifi + scripts/certs/russian_trusted_root_ca.crt.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -30,6 +39,7 @@ import random
 import re
 import signal
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -43,13 +53,22 @@ from curl_cffi import requests
 from curl_cffi.const import CurlOpt
 
 from src.providers.ozon import classify_response
+from src.providers.ozon_browser import BrowserOptions
+from src.providers.ozon_identity import (
+    BrowserMinter,
+    IdentityMinter,
+    IdentityStore,
+    StaticIdentityMinter,
+)
+from src.providers.ozon_provider import PAGE_API, product_url
+from src.providers.ozon_transport import CurlIdentityTransport, InPageTransport, Transport
 
 ROOT = Path(__file__).resolve().parent
 BACKOFF_CAP_SECONDS = 1800.0
 REQUEST_TIMEOUT_SECONDS = 15.0
 GATE_THRESHOLD = 0.90
 
-SourceKind = Literal["composer", "product"]
+SourceKind = Literal["composer", "product", "identity"]
 
 
 @dataclass(frozen=True)
@@ -58,6 +77,8 @@ class Source:
     url: str
     kind: SourceKind
     mobile: bool = False
+    #: Для kind="identity": True — fetch из вкладки Chromium, False — curl-реплей.
+    inpage: bool = False
 
 
 SOURCES: dict[str, Source] = {
@@ -82,8 +103,12 @@ SOURCES: dict[str, Source] = {
     ),
     "product": Source("product", "https://www.ozon.ru/product/{segment}/", "product"),
     "mobile-product": Source("mobile-product", "https://m.ozon.ru/product/{segment}/", "product"),
+    # Метод идентичности (omkarcloud/ozon-scraper + eduard256/shopper-mcp):
+    # браузер один раз проходит антибот, дальше запросы идут с его идентичностью.
+    "identity": Source("identity", PAGE_API, "identity"),
+    "identity-inpage": Source("identity-inpage", PAGE_API, "identity", inpage=True),
 }
-GATE_SOURCES = {name: src for name, src in SOURCES.items() if src.kind == "composer"}
+GATE_SOURCES = {name: src for name, src in SOURCES.items() if src.kind in ("composer", "identity")}
 
 MOBILE_HEADERS = {
     "User-Agent": "ozonapp_android/16.28.1+2401",
@@ -338,6 +363,104 @@ def _request(
     return resp.status_code, resp.text, None
 
 
+def _env_headless() -> bool:
+    """OZON_BROWSER_HEADLESS=false — показать окно браузера (отладка mint)."""
+    return os.environ.get("OZON_BROWSER_HEADLESS", "true").strip().lower() != "false"
+
+
+#: Запас сверх таймаута запроса: mint идентичности браузером занимает до ~40 с.
+_MINT_GRACE_SECONDS = 60.0
+
+
+class IdentityFetcher:
+    """Мост sync-раннера к async-транспорту метода идентичности.
+
+    Транспорт (curl-реплей или вкладка Chromium) живёт в отдельном event loop
+    на всё время run: идентичность кэшируется, вкладка переиспользуется.
+    Rate-limit делает сам раннер (interval >= 2 с + джиттер), поэтому берётся
+    транспорт напрямую, без OzonProvider с его собственным pace/backoff.
+    """
+
+    def __init__(
+        self,
+        source: Source,
+        *,
+        proxy: str | None,
+        ca_bundle: str,
+        profile_dir: Path,
+        cookie: str | None = None,
+        user_agent: str | None = None,
+        headless: bool = True,
+        transport: Transport | None = None,
+    ) -> None:
+        self._timeout = REQUEST_TIMEOUT_SECONDS
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._loop.run_forever, name="ozon-identity", daemon=True
+        )
+        self._thread.start()
+        if transport is not None:
+            self._transport: Transport = transport
+        elif source.inpage:
+            self._transport = InPageTransport(
+                BrowserOptions(profile_dir=profile_dir, headless=headless, proxy=proxy),
+                timeout=self._timeout,
+            )
+        else:
+            minter: IdentityMinter
+            if cookie and user_agent:
+                minter = StaticIdentityMinter(cookie, user_agent)
+            else:
+                minter = BrowserMinter(profile_dir=profile_dir, headless=headless, proxy=proxy)
+            self._transport = CurlIdentityTransport(
+                IdentityStore(minter),
+                proxy=proxy,
+                timeout=self._timeout,
+                ca_bundle=ca_bundle,
+            )
+
+    def request(self, segment: str) -> tuple[int, str, str | None]:
+        """Один запрос страницы товара. Сбой (mint/сеть) — (0, "", причина)."""
+        url = product_url(_sku(segment))
+        future = asyncio.run_coroutine_threadsafe(self._transport.get(url), self._loop)
+        try:
+            response = future.result(self._timeout + _MINT_GRACE_SECONDS)
+        except Exception as exc:  # noqa: BLE001 — спайк логирует любые сбои
+            return 0, "", f"{type(exc).__name__}: {str(exc)[:160]}"
+        return response.status, response.body, None
+
+    def close(self) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(self._transport.aclose(), self._loop).result(30.0)
+        except Exception:  # noqa: BLE001 — закрытие не должно ронять сводку
+            pass
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=10.0)
+
+
+def _identity_fetcher(
+    source: Source, proxy: str | None, bundle: str, run_dir: Path
+) -> IdentityFetcher:
+    return IdentityFetcher(
+        source,
+        proxy=proxy,
+        ca_bundle=bundle,
+        profile_dir=run_dir / "ozon-profile",
+        cookie=os.environ.get("OZON_COOKIE") or None,
+        user_agent=os.environ.get("OZON_USER_AGENT") or None,
+        headless=_env_headless(),
+    )
+
+
+def _should_backoff(cls: str, exc: str | None, source: Source) -> bool:
+    """Challenge — всегда backoff; метод идентичности — ещё и на сбой mint/сети.
+
+    Иначе заблокированный выход долбился бы каждые 2 с: mint не удался —
+    следующая попытка тут же снова запускает браузер и флагует IP сильнее.
+    """
+    return cls == "challenge" or (source.kind == "identity" and exc is not None)
+
+
 def probe_sources(segments: list[str], proxy: str | None, out_dir: Path) -> None:
     """Разовая проверка всех кандидатов без gate. Тела ответов не сохраняются."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -345,7 +468,6 @@ def probe_sources(segments: list[str], proxy: str | None, out_dir: Path) -> None
     segment = segments[0]
     results: list[dict[str, Any]] = []
     for source in SOURCES.values():
-        session = _session(source, bundle, proxy)
         started = time.monotonic()
         record: dict[str, Any] = {
             "ts": _iso(_now()),
@@ -355,7 +477,23 @@ def probe_sources(segments: list[str], proxy: str | None, out_dir: Path) -> None
             "env_proxies_disabled": proxy is None,
         }
         try:
-            status, body, _ = _request(source, session, segment)
+            if source.kind == "identity":
+                fetcher = _identity_fetcher(source, proxy, bundle, out_dir)
+                try:
+                    status, body, exc = fetcher.request(segment)
+                finally:
+                    fetcher.close()
+            else:
+                session = _session(source, bundle, proxy)
+                status, body, exc = _request(source, session, segment)
+            cls: str | None
+            if exc is not None:
+                cls = "error"
+                record["error"] = exc
+            elif source.kind == "product":
+                cls = None
+            else:
+                cls = classify_response(status, body)
             record.update(
                 {
                     "status": status,
@@ -363,7 +501,7 @@ def probe_sources(segments: list[str], proxy: str | None, out_dir: Path) -> None
                     "bytes": len(body),
                     "has_widgets": "widgetStates" in body,
                     "has_webprice": "webPrice" in body,
-                    "cls": classify_response(status, body) if source.kind == "composer" else None,
+                    "cls": cls,
                 }
             )
         except Exception as exc:  # noqa: BLE001 — спайк логирует любые сбои
@@ -409,6 +547,7 @@ def run(args: argparse.Namespace) -> None:
             "version": 1,
             "run_id": run_id,
             "source": source.name,
+            "kind": source.kind,
             "endpoint": source.url,
             "hours": float(args.hours),
             "min_interval_seconds": interval,
@@ -422,18 +561,32 @@ def run(args: argparse.Namespace) -> None:
             "proxy_configured": proxy is not None,
             "no_proxy_requested": bool(args.no_proxy),
         }
+        if source.kind == "identity":
+            manifest["identity_inpage"] = source.inpage
+            manifest["identity_mode"] = (
+                "static-cookie"
+                if os.environ.get("OZON_COOKIE") and os.environ.get("OZON_USER_AGENT")
+                else "browser-mint"
+            )
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(manifest_path, manifest)
 
     bundle = build_ca_bundle(run_dir)
-    session = _session(source, bundle, proxy)
+    fetcher: IdentityFetcher | None = None
+    session: requests.Session[requests.Response] | None = None
+    if source.kind == "identity":
+        fetcher = _identity_fetcher(source, proxy, bundle, run_dir)
+    else:
+        session = _session(source, bundle, proxy)
     remaining = max(0.0, (planned_end - _now()).total_seconds())
     deadline = time.monotonic() + remaining
     consecutive_challenges = 0
     attempt = 0
     print(
         f"spike start: source={source.name} skus={len(segments)} hours={manifest['hours']} "
-        f"interval>={interval}s proxy={'yes' if proxy else 'no'} run_dir={run_dir}",
+        f"interval>={interval}s proxy={'yes' if proxy else 'no'} "
+        f"identity={manifest.get('identity_mode', '-') if source.kind == 'identity' else '-'} "
+        f"run_dir={run_dir}",
         flush=True,
     )
     try:
@@ -447,7 +600,11 @@ def run(args: argparse.Namespace) -> None:
                     started_req = time.monotonic()
                     status, body, exc = 0, "", None
                     try:
-                        status, body, exc = _request(source, session, segment)
+                        if fetcher is not None:
+                            status, body, exc = fetcher.request(segment)
+                        else:
+                            assert session is not None
+                            status, body, exc = _request(source, session, segment)
                     except Exception as e:  # noqa: BLE001 — спайк логирует любые сбои
                         exc = type(e).__name__
                     cls = classify_response(status, body) if exc is None else "error"
@@ -465,12 +622,12 @@ def run(args: argparse.Namespace) -> None:
                     }
                     log.write(json.dumps(record, ensure_ascii=False) + "\n")
                     log.flush()
-                    if cls == "challenge":
+                    if _should_backoff(cls, exc, source):
                         consecutive_challenges += 1
                         backoff = min(2.0**consecutive_challenges, BACKOFF_CAP_SECONDS)
+                        reason = f"status={status}" if exc is None else exc
                         print(
-                            f"[{attempt}] {sku}: challenge (status={status}), "
-                            f"backoff {backoff:.0f}s",
+                            f"[{attempt}] {sku}: {cls} ({reason}), backoff {backoff:.0f}s",
                             flush=True,
                         )
                         _sleep(min(backoff, max(0.0, deadline - time.monotonic())))
@@ -485,6 +642,8 @@ def run(args: argparse.Namespace) -> None:
                             )
                         )
     finally:
+        if fetcher is not None:
+            fetcher.close()
         finished = _now()
         completed = finished >= planned_end
         _write_json(
