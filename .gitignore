@@ -21,3 +21,6 @@ spike_out/
 
 # Локальные инструменты песочницы (uv и т.п.)
 .tools/
+
+# Постоянный профиль Chromium для mint идентичности Ozon (cookie антибота)
+.ozon-profile/

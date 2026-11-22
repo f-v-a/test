@@ -26,10 +26,23 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     tz_default: str = "Europe/Moscow"
 
+    # http — идентичность браузера (abt_data + UA) + curl_cffi-реплей;
+    # headless — все запросы fetch-ем из живой вкладки Chromium;
+    # api — платный parser-API (не реализован, решение владельца).
     ozon_strategy: Literal["http", "headless", "api"] = "http"
     ozon_rps: float = 0.5
     ozon_proxy_url: str | None = None
     ozon_api_key: str | None = None
+    ozon_timeout_seconds: float = 20.0
+    ozon_max_attempts: int = 3
+    # Идентичность антибота: cookie владельца вместо браузерного mint.
+    # Работает только с того же egress-IP, где cookie получена.
+    ozon_cookie: str | None = None
+    ozon_user_agent: str | None = None
+    ozon_identity_ttl_seconds: float = 43200.0
+    ozon_profile_dir: str = ".ozon-profile"
+    ozon_browser_headless: bool = True
+    ozon_browser_mac_disguise: bool = True
 
     free_track_limit: int = 3
     plus_track_limit: int = 20
@@ -51,7 +64,9 @@ class Settings(BaseSettings):
             return [int(part) for part in value.split(",") if part.strip()]
         return value
 
-    @field_validator("ozon_proxy_url", "ozon_api_key", mode="before")
+    @field_validator(
+        "ozon_proxy_url", "ozon_api_key", "ozon_cookie", "ozon_user_agent", mode="before"
+    )
     @classmethod
     def _empty_to_none(cls, value: object) -> object:
         """Пустая строка в .env означает «не задано»."""
